@@ -9,13 +9,33 @@ console.log(
   process.env.STRIPE_SECRET_KEY ? "Loaded ✅" : "Missing ❌"
 );
 
+// ---- Environment-driven config ----
+const ENV = process.env.STRIPE_ENV || "test"; // "test" or "prod"
+
+const STRIPE_SECRET_KEY =
+  ENV === "prod"
+    ? process.env.STRIPE_SECRET_KEY_PROD
+    : process.env.STRIPE_SECRET_KEY_TEST;
+
+const STRIPE_LOCATION_ID =
+  ENV === "prod"
+    ? process.env.STRIPE_LOCATION_ID_PROD
+    : process.env.STRIPE_LOCATION_ID_TEST;
+
+const STRIPE_TERMINAL_ID = ENV === "prod" ? process.env.STRIPE_TERMINAL_ID_PROD : null;
+
+const stripe = new Stripe(STRIPE_SECRET_KEY, {
+  apiVersion: "2023-10-16",
+});
+
+console.log(`🧾 Stripe mode: ${ENV.toUpperCase()}`);
+console.log(`🔑 Key: ${STRIPE_SECRET_KEY?.startsWith("sk_live") ? "LIVE" : "TEST"}`);
+console.log(`📍 Location: ${STRIPE_LOCATION_ID || "<none>"}`);
+if (STRIPE_TERMINAL_ID) console.log(`📡 Reader: ${STRIPE_TERMINAL_ID}`);
+
 const app = express();
 app.use(cors());
 app.use(express.json());
-
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
-  apiVersion: "2023-10-16",
-});
 
 app.post("/api/payments", async (req, res) => {
   console.log("💳 Creating PaymentIntent:", req.body);
@@ -71,24 +91,44 @@ app.post("/api/terminal/charge", async (req, res) => {
   try {
     const { payment_intent_id } = req.body;
 
-    // Create a simulated reader (will persist in test mode)
-    const reader = await stripe.terminal.readers.create({
-      registration_code: "simulated-wpe",
-      label: "Simulated POS",
-      location: process.env.STRIPE_LOCATION_ID,
-    });
-
-    // Process the PaymentIntent on that simulated reader
-    const processed = await stripe.terminal.readers.processPaymentIntent(
-      reader.id,
-      {
-        payment_intent: payment_intent_id,
+    let readerId;
+    if (ENV === "prod") {
+      // Use configured physical reader in production
+      if (!STRIPE_TERMINAL_ID) {
+        return res.status(400).json({ error: "Missing STRIPE_TERMINAL_ID_PROD for production mode" });
       }
-    );
+      readerId = STRIPE_TERMINAL_ID;
+      console.log(`📡 Using physical reader ${readerId}`);
+    } else {
+      // Create a simulated reader in test mode
+      const reader = await stripe.terminal.readers.create({
+        registration_code: "simulated-wpe",
+        label: "Simulated POS",
+        location: STRIPE_LOCATION_ID,
+      });
+      readerId = reader.id;
+      console.log(`🧪 Created simulated reader ${readerId}`);
+    }
 
-    res.json({
-      reader: processed,
+    const processed = await stripe.terminal.readers.processPaymentIntent(readerId, {
+      payment_intent: payment_intent_id,
     });
+
+    // In test mode, optionally auto-present a card
+    if (ENV !== "prod" && process.env.STRIPE_SIMULATE_CARD === "true") {
+      const testCard = process.env.STRIPE_SIMULATE_CARD_NUMBER || "4242424242424242";
+      try {
+        await stripe.testHelpers.terminal.readers.presentPaymentMethod(readerId, {
+          type: "card_present",
+          card_present: { number: testCard },
+        });
+        console.log(`💳 Simulated card ${testCard} on reader ${readerId}`);
+      } catch (simErr) {
+        console.error("Failed to simulate card:", simErr.message);
+      }
+    }
+
+    res.json({ reader: processed });
   } catch (err) {
     console.error("Error processing payment:", err);
     res.status(500).json({ error: err.message });
@@ -106,7 +146,7 @@ app.get("/api/payment_intents/:id", async (req, res) => {
 });
 
 app.get("/health", (req, res) => {
-  res.json({ ok: true, message: "Backend reachable" });
+  res.json({ ok: true, message: `Backend reachable (${ENV})` });
 });
 
 const PORT = process.env.PORT || 4242;
