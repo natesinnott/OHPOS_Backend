@@ -4,10 +4,6 @@ import Stripe from "stripe";
 import cors from "cors";
 
 dotenv.config({ path: "./.env" });
-console.log(
-  "Stripe key:",
-  process.env.STRIPE_SECRET_KEY ? "Loaded ✅" : "Missing ❌"
-);
 
 // ---- Environment-driven config ----
 const ENV = process.env.STRIPE_ENV || "test"; // "test" or "prod"
@@ -16,6 +12,16 @@ const STRIPE_SECRET_KEY =
   ENV === "prod"
     ? process.env.STRIPE_SECRET_KEY_PROD
     : process.env.STRIPE_SECRET_KEY_TEST;
+
+if (!STRIPE_SECRET_KEY) {
+  console.error(
+    `❌ Missing Stripe secret key for ${ENV} mode. Expected ${
+      ENV === "prod" ? "STRIPE_SECRET_KEY_PROD" : "STRIPE_SECRET_KEY_TEST"
+    } in environment settings (Azure App Service → Configuration).`
+  );
+  // Fail fast so Azure restarts after you set the key
+  process.exit(1);
+}
 
 const STRIPE_LOCATION_ID =
   ENV === "prod"
