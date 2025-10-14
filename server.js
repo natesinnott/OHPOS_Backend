@@ -143,8 +143,36 @@ app.post("/api/terminal/charge", async (req, res) => {
 
 app.get("/api/payment_intents/:id", async (req, res) => {
   try {
-    const intent = await stripe.paymentIntents.retrieve(req.params.id);
-    res.json({ id: intent.id, status: intent.status });
+    const intent = await stripe.paymentIntents.retrieve(req.params.id, {
+      expand: ["latest_charge"],
+    });
+
+    const lastErr = intent.last_payment_error
+      ? {
+          code: intent.last_payment_error.code || null,
+          decline_code: intent.last_payment_error.decline_code || null,
+          message: intent.last_payment_error.message || null,
+          type: intent.last_payment_error.type || null,
+        }
+      : null;
+
+    const lc = intent.latest_charge || null;
+    const chargeFailureMessage = lc?.failure_message || null;
+    const chargeFailureCode = lc?.failure_code || null;
+    const outcome = lc?.outcome || null;
+    const outcomeType = outcome?.type || null;
+    const outcomeSellerMessage = outcome?.seller_message || null;
+
+    res.json({
+      id: intent.id,
+      status: intent.status,
+      last_payment_error: lastErr,
+      latest_charge_status: lc?.status ?? null,
+      latest_charge_failure_message: chargeFailureMessage,
+      latest_charge_failure_code: chargeFailureCode,
+      latest_charge_outcome_type: outcomeType,
+      latest_charge_outcome_seller_message: outcomeSellerMessage,
+    });
   } catch (err) {
     console.error("Error fetching PaymentIntent:", err);
     res.status(500).json({ error: err.message });
