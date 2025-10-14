@@ -23,13 +23,25 @@ app.post("/api/payments", async (req, res) => {
     const { amount, currency, category } = req.body;
 
     if (!amount || !currency) {
-      return res.status(400).json({ error: "Amount and currency are required." });
+      return res
+        .status(400)
+        .json({ error: "Amount and currency are required." });
     }
+
+    // Build a short, bank-safe statement descriptor suffix
+    const rawSuffix = (category || "POS").toString().toLowerCase();
+    let suffix;
+    if (rawSuffix.includes("concession")) suffix = "OHP CONCESSIONS";
+    else if (rawSuffix.includes("merch")) suffix = "OHP MERCH";
+    else suffix = "OHP POS";
+    // Stripe requires ≤22 chars
+    suffix = suffix.slice(0, 22);
 
     const paymentIntent = await stripe.paymentIntents.create({
       amount,
       currency,
       description: `OHP POS - ${category ?? "Unspecified"}`,
+      statement_descriptor_suffix: suffix,
       payment_method_types: ["card_present"],
       capture_method: "automatic",
     });
@@ -67,9 +79,12 @@ app.post("/api/terminal/charge", async (req, res) => {
     });
 
     // Process the PaymentIntent on that simulated reader
-    const processed = await stripe.terminal.readers.processPaymentIntent(reader.id, {
-      payment_intent: payment_intent_id,
-    });
+    const processed = await stripe.terminal.readers.processPaymentIntent(
+      reader.id,
+      {
+        payment_intent: payment_intent_id,
+      }
+    );
 
     res.json({
       reader: processed,
