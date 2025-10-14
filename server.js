@@ -42,6 +42,10 @@ if (STRIPE_TERMINAL_ID) console.log(`📡 Reader: ${STRIPE_TERMINAL_ID}`);
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use((req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  next();
+});
 
 app.post("/api/payments", async (req, res) => {
   console.log("💳 Creating PaymentIntent:", req.body);
@@ -116,9 +120,11 @@ app.post("/api/terminal/charge", async (req, res) => {
       console.log(`🧪 Created simulated reader ${readerId}`);
     }
 
-    const processed = await stripe.terminal.readers.processPaymentIntent(readerId, {
-      payment_intent: payment_intent_id,
-    });
+    const processed = await stripe.terminal.readers.processPaymentIntent(
+      readerId,
+      { payment_intent: payment_intent_id },
+      { idempotencyKey: `pi-process-${payment_intent_id}` }
+    );
 
     // In test mode, optionally auto-present a card
     if (ENV !== "prod" && process.env.STRIPE_SIMULATE_CARD === "true") {
@@ -163,9 +169,12 @@ app.get("/api/payment_intents/:id", async (req, res) => {
     const outcomeType = outcome?.type || null;
     const outcomeSellerMessage = outcome?.seller_message || null;
 
+    const effectiveStatus = (intent.status === 'succeeded' || lc?.status === 'succeeded') ? 'succeeded' : intent.status;
+
     res.json({
       id: intent.id,
       status: intent.status,
+      effective_status: effectiveStatus,
       last_payment_error: lastErr,
       latest_charge_status: lc?.status ?? null,
       latest_charge_failure_message: chargeFailureMessage,
