@@ -50,7 +50,7 @@ app.use((req, res, next) => {
 app.post("/api/payments", async (req, res) => {
   console.log("💳 Creating PaymentIntent:", req.body);
   try {
-    const { amount, currency, category } = req.body;
+    const { amount, currency, category, description, art_number } = req.body;
 
     if (!amount || !currency) {
       return res
@@ -58,11 +58,13 @@ app.post("/api/payments", async (req, res) => {
         .json({ error: "Amount and currency are required." });
     }
 
-    // Build a short, bank-safe statement descriptor suffix
+    const computedDescription = description || `OHP POS - ${category ?? "Unspecified"}`;
+
     const rawSuffix = (category || "POS").toString().toLowerCase();
     let suffix;
     if (rawSuffix.includes("concession")) suffix = "OHP CONCESSIONS";
     else if (rawSuffix.includes("merch")) suffix = "OHP MERCH";
+    else if (rawSuffix.includes("art")) suffix = "OHP ART";
     else suffix = "OHP POS";
     // Stripe requires ≤22 chars
     suffix = suffix.slice(0, 22);
@@ -70,10 +72,11 @@ app.post("/api/payments", async (req, res) => {
     const paymentIntent = await stripe.paymentIntents.create({
       amount,
       currency,
-      description: `OHP POS - ${category ?? "Unspecified"}`,
+      description: computedDescription,
       statement_descriptor_suffix: suffix,
       payment_method_types: ["card_present"],
       capture_method: "automatic",
+      ...(art_number != null ? { metadata: { art_number: String(art_number) } } : {}),
     });
 
     res.json({
