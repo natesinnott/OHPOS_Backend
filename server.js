@@ -96,6 +96,10 @@ const limiter = rateLimit({
   limit: Number(process.env.RATE_LIMIT_PER_MINUTE || 60),
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req) => {
+    const raw = req.ip || "";
+    return raw.split(",")[0].trim().split(":")[0]; // strip port if present
+  },
 });
 app.use("/api", limiter);
 
@@ -196,7 +200,7 @@ app.post("/api/terminal/charge", async (req, res) => {
 
     const processed = await stripe.terminal.readers.processPaymentIntent(
       readerId,
-      { payment_intent: payment_intent_id, metadata: { device_key: req.deviceKey || "unknown" } },
+      { payment_intent: payment_intent_id },
       { idempotencyKey: `pi-process-${payment_intent_id}` }
     );
 
