@@ -2,6 +2,7 @@ import express from "express";
 import dotenv from "dotenv";
 import Stripe from "stripe";
 import cors from "cors";
+import rateLimit from "express-rate-limit";
 
 dotenv.config({ path: "./.env" });
 
@@ -15,7 +16,7 @@ const STRIPE_SECRET_KEY =
 
 if (!STRIPE_SECRET_KEY) {
   console.error(
-    `❌ Missing Stripe secret key for ${ENV} mode. Expected ${
+    `Missing Stripe secret key for ${ENV} mode. Expected ${
       ENV === "prod" ? "STRIPE_SECRET_KEY_PROD" : "STRIPE_SECRET_KEY_TEST"
     } in environment settings (Azure App Service → Configuration).`
   );
@@ -34,16 +35,72 @@ const stripe = new Stripe(STRIPE_SECRET_KEY, {
   apiVersion: "2023-10-16",
 });
 
-console.log(`🧾 Stripe mode: ${ENV.toUpperCase()}`);
-console.log(`🔑 Key: ${STRIPE_SECRET_KEY?.startsWith("sk_live") ? "LIVE" : "TEST"}`);
-console.log(`📍 Location: ${STRIPE_LOCATION_ID || "<none>"}`);
+console.log(`Stripe mode: ${ENV.toUpperCase()}`);
+console.log(`Key: ${STRIPE_SECRET_KEY?.startsWith("sk_live") ? "LIVE" : "TEST"}`);
+console.log(`Location: ${STRIPE_LOCATION_ID || "<none>"}`);
 if (STRIPE_TERMINAL_ID) console.log(`📡 Reader: ${STRIPE_TERMINAL_ID}`);
 
 const app = express();
+app.set("trust proxy", 1);
 app.use(cors());
 app.use(express.json());
 app.use((req, res, next) => {
   res.set('Cache-Control', 'no-store');
+  next();
+});
+
+// --- API key verification (supports POS_BACKEND_KEY or POS_BACKEND_KEYS) ---
+const SINGLE_API_KEY = (process.env.POS_BACKEND_KEY || "").trim();
+const MULTI_KEYS_RAW = (process.env.POS_BACKEND_KEYS || "");
+const MULTI_KEYS = new Set(
+  MULTI_KEYS_RAW
+    .split(/[\n,\s,]+/)
+    .map(s => s.trim())
+    .filter(Boolean)
+);
+
+function hasValidKey(value) {
+  if (!value) return false;
+  if (SINGLE_API_KEY && value === SINGLE_API_KEY) return true;
+  if (MULTI_KEYS.size > 0 && MULTI_KEYS.has(value)) return true;
+  return false;
+}
+
+function authMiddleware(req, res, next) {
+  if (!SINGLE_API_KEY && MULTI_KEYS.size === 0) {
+    return res.status(500).json({ error: "Server not configured: missing POS_BACKEND_KEY or POS_BACKEND_KEYS" });
+  }
+  const presented = req.header("x-api-key") || req.header("x-device-key");
+  if (!hasValidKey(presented)) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  return next();
+}
+
+// Apply auth to all /api routes (health remains open)
+app.use("/api", authMiddleware);
+
+// --- Basic rate limiting for /api ---
+const limiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: Number(process.env.RATE_LIMIT_PER_MINUTE || 60),
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use("/api", limiter);
+
+// --- Require Idempotency-Key for POSTs to /api ---
+app.use("/api", (req, res, next) => {
+  if (req.method.toUpperCase() === "POST") {
+    const idem = req.header("Idempotency-Key");
+    if (!idem) return res.status(400).json({ error: "Missing Idempotency-Key header" });
+  }
+  next();
+});
+
+app.use((req, res, next) => {
+  const key = req.header("x-api-key") || req.header("x-device-key") || null;
+  req.deviceKey = key;
   next();
 });
 
@@ -76,7 +133,10 @@ app.post("/api/payments", async (req, res) => {
       statement_descriptor_suffix: suffix,
       payment_method_types: ["card_present"],
       capture_method: "automatic",
-      ...(art_number != null ? { metadata: { art_number: String(art_number) } } : {}),
+      metadata: {
+        ...(art_number != null ? { art_number: String(art_number) } : {}),
+        device_key: req.deviceKey || "unknown"
+      },
     });
 
     res.json({
@@ -91,7 +151,8 @@ app.post("/api/payments", async (req, res) => {
 
 app.post("/api/terminal/connection_token", async (req, res) => {
   try {
-    const token = await stripe.terminal.connectionTokens.create();
+    console.log("🔐 Terminal token requested by:", req.deviceKey || "unknown");
+    const token = await stripe.terminal.connectionTokens.create({ metadata: { device_key: req.deviceKey || "unknown" } });
     res.json({ secret: token.secret });
   } catch (err) {
     console.error("Error creating connection token:", err);
@@ -100,7 +161,7 @@ app.post("/api/terminal/connection_token", async (req, res) => {
 });
 
 app.post("/api/terminal/charge", async (req, res) => {
-  console.log("🧾 Processing on reader:", req.body);
+  console.log("Processing on reader:", req.body);
   try {
     const { payment_intent_id } = req.body;
 
@@ -111,7 +172,7 @@ app.post("/api/terminal/charge", async (req, res) => {
         return res.status(400).json({ error: "Missing STRIPE_TERMINAL_ID_PROD for production mode" });
       }
       readerId = STRIPE_TERMINAL_ID;
-      console.log(`📡 Using physical reader ${readerId}`);
+      console.log(`Using physical reader ${readerId}`);
     } else {
       // Create a simulated reader in test mode
       const reader = await stripe.terminal.readers.create({
@@ -120,12 +181,12 @@ app.post("/api/terminal/charge", async (req, res) => {
         location: STRIPE_LOCATION_ID,
       });
       readerId = reader.id;
-      console.log(`🧪 Created simulated reader ${readerId}`);
+      console.log(`Created simulated reader ${readerId}`);
     }
 
     const processed = await stripe.terminal.readers.processPaymentIntent(
       readerId,
-      { payment_intent: payment_intent_id },
+      { payment_intent: payment_intent_id, metadata: { device_key: req.deviceKey || "unknown" } },
       { idempotencyKey: `pi-process-${payment_intent_id}` }
     );
 
@@ -137,7 +198,7 @@ app.post("/api/terminal/charge", async (req, res) => {
           type: "card_present",
           card_present: { number: testCard },
         });
-        console.log(`💳 Simulated card ${testCard} on reader ${readerId}`);
+        console.log(`Simulated card ${testCard} on reader ${readerId}`);
       } catch (simErr) {
         console.error("Failed to simulate card:", simErr.message);
       }
