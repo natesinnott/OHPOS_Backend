@@ -49,6 +49,16 @@ app.use((req, res, next) => {
   next();
 });
 
+// --- Debug request logger (logs method, path, headers, body) ---
+app.use((req, res, next) => {
+  console.log("📥 Incoming Request:");
+  console.log("Method:", req.method);
+  console.log("Path:", req.originalUrl);
+  console.log("Headers:", req.headers);
+  console.log("Body:", req.body);
+  next();
+});
+
 // --- API key verification (supports POS_BACKEND_KEY or POS_BACKEND_KEYS) ---
 const SINGLE_API_KEY = (process.env.POS_BACKEND_KEY || "").trim();
 const MULTI_KEYS_RAW = (process.env.POS_BACKEND_KEYS || "");
