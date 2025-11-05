@@ -3,6 +3,7 @@ import dotenv from "dotenv";
 import Stripe from "stripe";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
+import { isIP } from "node:net";
 
 dotenv.config({ path: "./.env" });
 
@@ -59,6 +60,39 @@ app.use((req, res, next) => {
   next();
 });
 
+// --- Client IP extractor (IPv4/IPv6, strips port, honors X-Forwarded-For) ---
+function getClientIp(req) {
+  const header = (req.headers["x-forwarded-for"] || req.ip || "").toString();
+  let token = header.split(",")[0].trim();
+  if (!token) token = "";
+
+  // Strip IPv6 brackets if present
+  if (token.startsWith("[") && token.includes("]")) {
+    token = token.slice(1, token.indexOf("]"));
+  }
+  // If looks like host:port, strip the trailing :port (handle IPv6 without brackets by stripping the last :digits)
+  const lastColon = token.lastIndexOf(":");
+  if (lastColon !== -1 && /^\d+$/.test(token.slice(lastColon + 1))) {
+    token = token.slice(0, lastColon);
+  }
+  // Normalize IPv4-mapped IPv6
+  if (token.startsWith("::ffff:")) token = token.slice(7);
+
+  // Validate; if invalid, fall back to remoteAddress with the same cleaning
+  if (!isIP(token)) {
+    let ra = (req.socket && req.socket.remoteAddress) || "";
+    if (ra.startsWith("[")) {
+      const end = ra.indexOf("]");
+      if (end !== -1) ra = ra.slice(1, end);
+    }
+    const lc = ra.lastIndexOf(":");
+    if (lc !== -1 && /^\d+$/.test(ra.slice(lc + 1))) ra = ra.slice(0, lc);
+    if (ra.startsWith("::ffff:")) ra = ra.slice(7);
+    if (isIP(ra)) return ra;
+  }
+  return token || "unknown";
+}
+
 // --- API key verification (supports POS_BACKEND_KEY or POS_BACKEND_KEYS) ---
 const SINGLE_API_KEY = (process.env.POS_BACKEND_KEY || "").trim();
 const MULTI_KEYS_RAW = (process.env.POS_BACKEND_KEYS || "");
@@ -96,10 +130,7 @@ const limiter = rateLimit({
   limit: Number(process.env.RATE_LIMIT_PER_MINUTE || 60),
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => {
-    const raw = req.ip || "";
-    return raw.split(",")[0].trim().split(":")[0]; // strip port if present
-  },
+  keyGenerator: (req) => getClientIp(req),
 });
 app.use("/api", limiter);
 
@@ -166,7 +197,7 @@ app.post("/api/payments", async (req, res) => {
 app.post("/api/terminal/connection_token", async (req, res) => {
   try {
     console.log("🔐 Terminal token requested by:", req.deviceKey || "unknown");
-    const token = await stripe.terminal.connectionTokens.create({ metadata: { device_key: req.deviceKey || "unknown" } });
+    const token = await stripe.terminal.connectionTokens.create();
     res.json({ secret: token.secret });
   } catch (err) {
     console.error("Error creating connection token:", err);
